@@ -1,5 +1,6 @@
 {
   "cleanUrls": true,
   "installCommand": "echo 'Skipping npm install for static site'",
-  "buildCommand": "echo 'Deploying static files'"
+  "buildCommand": "echo 'Deploying static files'",
+  "outputDirectory": "."
 }
