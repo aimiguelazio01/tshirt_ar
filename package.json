@@ -1,0 +1,24 @@
+{
+  "name": "nfc-ar2",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebAR T-shirt experience (MindAR + A-Frame). Static site + asset build scripts.",
+  "scripts": {
+    "build:targets": "node build-targets.mjs",
+    "build:model": "node build-model.mjs",
+    "build": "npm run build:targets && npm run build:model",
+    "serve": "npx http-server . -p 8080 -c-1 -S -C cert.pem -K key.pem",
+    "smoke": "node smoke-test.mjs"
+  },
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@msgpack/msgpack": "^3.1.3",
+    "@tensorflow/tfjs-backend-cpu": "^3.21.0",
+    "@tensorflow/tfjs-core": "^3.21.0",
+    "mind-ar": "^1.2.5",
+    "pngjs": "^7.0.0",
+    "puppeteer-core": "^22.15.0",
+    "three": "^0.184.0"
+  }
+}

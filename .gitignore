@@ -1,0 +1,14 @@
+# Dependencies (build-time only — NOT needed to run the deployed site)
+node_modules/
+
+# Lockfile: dev tooling is machine-specific, not part of the static site
+package-lock.json
+
+# Local TLS certs for HTTPS testing (see README §3)
+cert.pem
+key.pem
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.log

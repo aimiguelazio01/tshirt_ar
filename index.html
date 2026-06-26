@@ -1,0 +1,1612 @@
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  MV — WebAR T-Shirt Experience
+  ----------------------------------------------------------------------------
+  Single-file, production-ready WebAR experience built with:
+    • MindAR Image Tracking  (1.2.5)  — logo recognition & anchoring
+    • A-Frame                (1.5.0)  — declarative 3D scene
+    • Three.js               (bundled in A-Frame) — rendering
+    • aframe-extras          (7.1.0)  — animation-mixer for GLB clips
+  No build tools. Drop this file + assets on any static host.
+
+  Folder structure expected next to this file:
+    /
+    ├── index.html        <- you are here
+    ├── targets.mind      <- MindAR compiled image target (logo)
+    ├── assets/3d/adamHead/adamHead.gltf <- the 3D model
+    ├── logo.png          <- brand logo for the UI  (your mv_logo.png)
+    └── assets/
+        ├── textures/
+        └── audio/
+  ============================================================================
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- Lock the viewport for a true full-screen mobile feel. -->
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <meta name="description" content="Scan the logo on the T-shirt to launch an immersive augmented reality experience." />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>AR Experience</title>
+
+  <!--
+    ===========================================================================
+    MINDAR + A-FRAME LIBRARIES (pinned versions, vendored locally)
+    Order matters:
+      1) A-Frame              — scene graph / Three.js
+      2) aframe-extras        — animation-mixer for GLB clips
+      3) MindAR A-Frame bridge — self-contained: bundles the MindAR engine +
+           TensorFlow.js, sets window.MINDAR.IMAGE, and registers the
+           mindar-image (scene) and mindar-image-target (entity) components.
+
+    NOTE: do NOT also load mindar-image.prod.js. That "core" file is shipped
+    as an ES module (import/export) and cannot run as a classic <script> — it
+    throws a SyntaxError. It is also unnecessary: the bridge above already
+    contains the entire engine for the A-Frame path.
+    Local vendored copies => works offline, no CDN dependency.
+    ===========================================================================
+  -->
+  <script src="./vendor/aframe.min.js"></script>
+  <script src="./vendor/aframe-extras.min.js"></script>
+  <script src="./vendor/mindar-image-aframe.prod.js"></script>
+
+  <style>
+    /* =========================================================================
+       DESIGN TOKENS — match the minimalist black/white brand identity.
+       ========================================================================= */
+    :root {
+      --bg:        #0a0a0a;
+      --bg-soft:   #141414;
+      --fg:        #ffffff;
+      --fg-dim:    rgba(255, 255, 255, 0.66);
+      --fg-mute:   rgba(255, 255, 255, 0.40);
+      --accent:    #ffffff;
+      --accent-2:  #cfcfcf;
+      --danger:    #ff5a5a;
+      --ok:        #46d17a;
+      --radius:    18px;
+      --radius-sm: 12px;
+      --shadow:    0 18px 50px rgba(0, 0, 0, 0.55);
+      --ease:      cubic-bezier(0.22, 1, 0.36, 1);
+      --safe-top:    env(safe-area-inset-top,    0px);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+              Arial, "Apple Color Emoji", sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--font);
+      -webkit-font-smoothing: antialiased;
+      -webkit-tap-highlight-color: transparent;
+      overflow: hidden;            /* AR is full-screen; no page scroll */
+      overscroll-behavior: none;
+      touch-action: manipulation;  /* kill the 300ms tap delay */
+    }
+
+    /* The 3D scene canvas fills the screen behind every overlay. */
+    #ar-container { position: fixed; inset: 0; z-index: 0; }
+    #ar-container a-scene,
+    #ar-container canvas { width: 100% !important; height: 100% !important; }
+
+    /* =========================================================================
+       GENERIC OVERLAY — shared by every full-screen state.
+       ========================================================================= */
+    .overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 0 26px;
+      text-align: center;
+      background:
+        radial-gradient(120% 80% at 50% 0%, #1b1b1b 0%, var(--bg) 60%) ,
+        var(--bg);
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity .5s var(--ease), visibility .5s var(--ease);
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .overlay.is-visible { opacity: 1; visibility: visible; }
+
+    .overlay-inner {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 22px;
+      width: 100%;
+      max-width: 420px;
+      margin: auto 0;
+      padding: calc(28px + var(--safe-top)) 0 calc(28px + var(--safe-bottom));
+    }
+
+    /* Responsive camera stream injected by MindAR */
+    body > video {
+      object-fit: cover !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
+      z-index: -10 !important;
+    }
+
+    /* Brand logo mark (uses ./logo.png). */
+    .brand {
+      width: 78px; height: 78px;
+      display: grid; place-items: center;
+      background: #fff;
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .brand img { width: 64%; height: 64%; object-fit: contain; filter: grayscale(1) brightness(0); }
+    .brand--lg { width: 92px; height: 92px; }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: .28em;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--fg-mute);
+    }
+    .title {
+      margin: 0;
+      font-size: clamp(26px, 7vw, 38px);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.05;
+    }
+    .subtitle { margin: 0; color: var(--fg-dim); font-size: 15px; line-height: 1.5; max-width: 320px; }
+
+    /* =========================================================================
+       LOADING SCREEN — progress bar + spinner.
+       ========================================================================= */
+    #loading-screen .spinner {
+      width: 46px; height: 46px;
+      border-radius: 50%;
+      border: 3px solid rgba(255,255,255,.12);
+      border-top-color: var(--fg);
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .progress-wrap {
+      width: min(280px, 78vw);
+      height: 6px;
+      background: rgba(255,255,255,.10);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .progress-bar {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #fff, #bdbdbd);
+      border-radius: 999px;
+      transition: width .25s var(--ease);
+    }
+    .progress-label { font-size: 13px; color: var(--fg-mute); font-variant-numeric: tabular-nums; }
+
+    /* =========================================================================
+       START SCREEN — hero + instructions + CTA.
+       ========================================================================= */
+    #start-screen .hero {
+      width: min(300px, 82vw);
+      aspect-ratio: 4 / 3;
+      border-radius: var(--radius);
+      background:
+        repeating-conic-gradient(#161616 0% 25%, #1c1c1c 0% 50%) 0 / 28px 28px,
+        #161616;
+      border: 1px solid rgba(255,255,255,.07);
+      display: grid; place-items: center;
+      position: relative; overflow: hidden;
+    }
+    /* Replace this block with <img src="./assets/hero.jpg"> for a real hero. */
+    .hero::after {
+      content: "HERO IMAGE";
+      font-size: 11px; letter-spacing: .3em; color: var(--fg-mute);
+    }
+
+    .steps {
+      list-style: none; margin: 0; padding: 0;
+      display: grid; gap: 10px; text-align: left;
+      color: var(--fg-dim); font-size: 14px; max-width: 320px;
+    }
+    .steps li { display: flex; gap: 12px; align-items: flex-start; }
+    .steps .num {
+      flex: none; width: 22px; height: 22px; border-radius: 50%;
+      display: grid; place-items: center; font-size: 12px; font-weight: 700;
+      background: #fff; color: #000;
+    }
+
+    /* =========================================================================
+       BUTTONS
+       ========================================================================= */
+    .btn {
+      -webkit-appearance: none; appearance: none;
+      border: 0; cursor: pointer;
+      font-family: inherit; font-weight: 700; font-size: 16px;
+      color: #000; background: var(--fg);
+      padding: 16px 30px; border-radius: 999px;
+      box-shadow: var(--shadow);
+      transition: transform .15s var(--ease), opacity .15s var(--ease), background .15s var(--ease);
+      min-width: 220px;
+    }
+    .btn:active { transform: scale(.96); }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn--ghost { background: transparent; color: var(--fg); border: 1px solid rgba(255,255,255,.25); box-shadow: none; }
+    .btn--danger { background: var(--danger); color: #fff; }
+
+    /* =========================================================================
+       CAMERA PICKER — shown after Start, before the scene initializes.
+       Lets the user choose front / back / a specific lens (multi-camera phones).
+       ========================================================================= */
+    #camera-screen { gap: 18px; }
+    #camera-screen .title { font-size: clamp(22px, 6vw, 30px); }
+    #camera-list {
+      list-style: none; margin: 0; padding: 0;
+      width: 100%;
+      display: grid; gap: 10px;
+      max-height: 40vh; overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    #camera-list li {
+      width: 100%;
+      display: flex; align-items: center; gap: 14px;
+      text-align: left;
+      background: rgba(255,255,255,.06);
+      border: 1px solid rgba(255,255,255,.10);
+      color: var(--fg);
+      font-family: inherit; font-size: 15px; font-weight: 600;
+      padding: 14px 16px; border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background .15s var(--ease), border-color .15s var(--ease);
+    }
+    #camera-list li:active { transform: scale(.99); }
+    #camera-list li:hover { background: rgba(255,255,255,.10); }
+    #camera-list li.is-selected {
+      background: var(--fg); color: #000; border-color: var(--fg);
+    }
+    #camera-list li.is-selected .cam-sub { color: rgba(0,0,0,.6); }
+    #camera-list .cam-icon {
+      flex: none; width: 34px; height: 34px; border-radius: 9px;
+      display: grid; place-items: center; font-size: 16px;
+      background: rgba(255,255,255,.10);
+    }
+    #camera-list li.is-selected .cam-icon { background: rgba(0,0,0,.12); }
+    #camera-list .cam-main { display: block; }
+    #camera-list .cam-sub {
+      display: block; font-weight: 500; font-size: 12px; color: var(--fg-mute);
+      margin-top: 2px;
+    }
+    #camera-screen .cam-actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+    #camera-screen .cam-status { font-size: 13px; color: var(--fg-mute); min-height: 18px; }
+
+    /* =========================================================================
+       HUD — live AR overlays (instructions, lost-tracking, status).
+       Pointer-events are disabled on wrappers so the camera feed stays live;
+       re-enabled only on the small interactive controls.
+       ========================================================================= */
+    .hud {
+      position: fixed; inset: 0; z-index: 8;
+      pointer-events: none;
+      display: flex; flex-direction: column;
+      padding: calc(16px + var(--safe-top)) 18px calc(16px + var(--safe-bottom));
+    }
+    .hud__top {
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .hud__pill {
+      -webkit-appearance: none; appearance: none;
+      outline: none;
+      font-family: inherit;
+      cursor: pointer;
+      pointer-events: auto;
+      background: rgba(0,0,0,.55);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,.12);
+      color: var(--fg); font-size: 12px; font-weight: 600;
+      padding: 8px 14px; border-radius: 999px;
+      display: inline-flex; align-items: center; gap: 8px;
+      text-decoration: none;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 rgba(70,209,122,.6); animation: pulse 1.8s infinite; }
+    @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(70,209,122,.5);} 70%{box-shadow:0 0 0 8px rgba(70,209,122,0);} 100%{box-shadow:0 0 0 0 rgba(70,209,122,0);} }
+
+    .hud__center {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+    }
+    .hint-card {
+      pointer-events: auto;
+      max-width: 320px;
+      background: rgba(0,0,0,.55);
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      display: grid; gap: 8px; justify-items: center; text-align: center;
+      opacity: 0; transform: translateY(8px);
+      transition: opacity .4s var(--ease), transform .4s var(--ease);
+    }
+    .hint-card.is-visible { opacity: 1; transform: translateY(0); }
+    .hint-card .hint-icon {
+      width: 38px; height: 38px; border-radius: 50%;
+      border: 2px solid var(--fg); display: grid; place-items: center;
+      animation: bob 1.6s var(--ease) infinite;
+    }
+    @keyframes bob { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-5px);} }
+    .hint-card h3 { margin: 4px 0 0; font-size: 16px; }
+    .hint-card p { margin: 0; font-size: 13px; color: var(--fg-dim); }
+
+    /* Lost-tracking variant uses a warmer accent. */
+    .hint-card--lost { border-color: rgba(255,120,90,.4); }
+    .hint-card--lost .hint-icon { border-color: var(--danger); }
+
+    /* =========================================================================
+       ERROR SCREEN
+       ========================================================================= */
+    #error-screen .err-icon {
+      width: 64px; height: 64px; border-radius: 50%;
+      border: 2px solid var(--danger); color: var(--danger);
+      display: grid; place-items: center; font-size: 30px; font-weight: 700;
+    }
+    #error-screen .retry { margin-top: 6px; }
+
+    /* =========================================================================
+       UTILITIES
+       ========================================================================= */
+    .hidden { display: none !important; }
+    .fade-out { opacity: 0 !important; visibility: hidden !important; }
+
+    /* Mobile-specific landscape adjustments */
+    @media (max-height: 480px) and (orientation: landscape) {
+      .overlay-inner {
+        gap: 12px;
+        padding-top: calc(12px + var(--safe-top));
+        padding-bottom: calc(12px + var(--safe-bottom));
+      }
+      #start-screen .hero {
+        display: none;
+      }
+      .brand--lg {
+        width: 60px; height: 60px;
+      }
+      .title {
+        font-size: 20px;
+      }
+      .steps {
+        font-size: 12px;
+        gap: 6px;
+      }
+      .btn {
+        padding: 12px 24px;
+        font-size: 14px;
+        min-width: 180px;
+      }
+    }
+
+    /* Small portrait screen adjustments */
+    @media (max-height: 640px) {
+      .overlay-inner {
+        gap: 16px;
+      }
+      #start-screen .hero {
+        width: min(240px, 70vw);
+      }
+      .brand--lg {
+        width: 70px; height: 70px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- =========================================================================
+       0) BOOT MONITOR — runs FIRST, independent of any CDN.
+       If A-Frame/MindAR fail to download, the page would otherwise stay on
+       "Loading… 0%" forever. This inline script guarantees a clear error
+       appears within ~8s no matter what. (Production safety net.)
+       ========================================================================= -->
+  <script>
+    (function () {
+      function kill() {
+        var ls = document.getElementById("loading-screen");
+        var es = document.getElementById("error-screen");
+        var et = document.getElementById("error-title");
+        var em = document.getElementById("error-message");
+        if (et) et.textContent = "Couldn't load AR libraries";
+        if (em) em.textContent =
+          "A required script failed to download (CDN blocked or offline). " +
+          "Check your connection and tap Reload to retry.";
+        if (ls) ls.classList.remove("is-visible");
+        if (es) es.classList.add("is-visible");
+      }
+      window.addEventListener("load", function () {
+        // If A-Frame still isn't present 8s after page load, the CDN failed.
+        setTimeout(function () {
+          if (!window.AFRAME) kill();
+        }, 8000);
+      });
+    })();
+  </script>
+  <!-- =========================================================================
+       1) AR SCENE CONTAINER
+       The <a-scene> is injected here by JS AFTER the user taps "Start".
+       Deferring creation gates the camera permission prompt behind a user
+       gesture (required by iOS/Safari) and lets us show a real loading bar.
+       ========================================================================= -->
+  <div id="ar-container"></div>
+
+  <!-- =========================================================================
+       2) LOADING SCREEN — shown while assets (model + targets) preload.
+       ========================================================================= -->
+  <section id="loading-screen" class="overlay is-visible" role="status" aria-live="polite">
+    <div class="overlay-inner">
+      <div class="brand"><img src="./logo.png" alt="" onerror="this.style.display='none'" /></div>
+      <p class="eyebrow">Augmented Reality</p>
+      <div class="spinner"></div>
+      <div class="progress-wrap"><div id="progress-bar" class="progress-bar"></div></div>
+      <p id="progress-label" class="progress-label">Loading AR Experience… 0%</p>
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       3) START SCREEN — brand hero + instructions + CTA.
+       ========================================================================= -->
+  <section id="start-screen" class="overlay" aria-label="Start screen">
+    <div class="overlay-inner">
+      <div class="brand brand--lg"><img src="./logo.png" alt="" onerror="this.style.display='none'" /></div>
+      <div>
+        <p class="eyebrow">Bring the shirt to life</p>
+        <h1 class="title">Scan the logo.<br/>Enter the experience.</h1>
+      </div>
+      <div class="hero" aria-hidden="true"></div>
+      <ol class="steps">
+        <li><span class="num">1</span><span>Tap <strong>Start</strong> and allow camera access.</span></li>
+        <li><span class="num">2</span><span>Point your phone at the printed logo on the T-shirt.</span></li>
+        <li><span class="num">3</span><span>Keep the logo in frame — the animation stays anchored.</span></li>
+      </ol>
+      <button id="start-btn" class="btn" disabled>Starting…</button>
+      <p class="subtitle">Works in Safari &amp; Chrome — no app required.</p>
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       3b) CAMERA PICKER — choose which camera/lens before AR starts.
+       Injected/populated by JS after the user taps Start.
+       ========================================================================= -->
+  <section id="camera-screen" class="overlay" aria-label="Choose camera">
+    <div class="overlay-inner">
+      <p class="eyebrow">Camera</p>
+      <h1 class="title">Pick a camera</h1>
+      <ul id="camera-list" role="listbox" aria-label="Available cameras"></ul>
+      <p id="cam-status" class="cam-status"></p>
+      <div class="cam-actions">
+        <button id="cam-confirm" class="btn" disabled>Start with selected</button>
+        <button id="cam-back" class="btn btn--ghost">Back</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- =========================================================================
+       4) HUD — live overlays during the AR session.
+       ========================================================================= -->
+  <div id="hud" class="hud hidden">
+    <div class="hud__top">
+      <span class="hud__pill" id="status-pill"><span class="dot"></span> AR Live</span>
+      <button id="exit-btn" class="hud__pill" style="background:rgba(0,0,0,.55);cursor:pointer;">✕ Exit</button>
+    </div>
+
+    <div class="hud__center">
+      <!-- Default tracking hint (shown until first detection). -->
+      <div id="hint-search" class="hint-card is-visible">
+        <div class="hint-icon">◎</div>
+        <h3>Find the logo</h3>
+        <p>Point your camera at the logo on the T-shirt.</p>
+      </div>
+
+      <!-- Lost-tracking hint (shown when the target disappears). -->
+      <div id="hint-lost" class="hint-card hint-card--lost">
+        <div class="hint-icon">⚠</div>
+        <h3>Logo not visible</h3>
+        <p>Move closer and point at the shirt to continue.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- =========================================================================
+       5) ERROR SCREEN — friendly recovery UI.
+       ========================================================================= -->
+  <section id="error-screen" class="overlay" role="alert" aria-live="assertive">
+    <div class="overlay-inner">
+      <div class="err-icon">!</div>
+      <h1 class="title" id="error-title">Something went wrong</h1>
+      <p id="error-message" class="subtitle">We couldn't start the experience. Please try again.</p>
+      <div class="retry" style="display:flex;gap:12px;flex-wrap:wrap;justify-content:center;">
+        <button id="retry-btn" class="btn">Try again</button>
+        <button id="reload-btn" class="btn btn--ghost">Reload page</button>
+      </div>
+    </div>
+  </section>
+
+  <script>
+  /* ===========================================================================
+     MV WebAR — application logic.
+     Organized into small, commented modules for readability:
+       • CONFIG            — tunable constants
+       • Util              — small DOM helpers
+       • Preloader         — XHR asset preloading w/ real progress
+       • Features          — capability detection (WebGL, camera, browser)
+       • AudioManager      — lazy AudioContext, unlocked on user gesture
+       • ARScene           — builds + controls the MindAR/A-Frame scene
+       • Effects           — entrance animation, fade, particle burst
+       • App               — orchestrates the whole journey + error recovery
+     =========================================================================== */
+  (function () {
+    "use strict";
+
+    /* ----------------------------- CONFIG ---------------------------------- */
+    const CONFIG = {
+      assets: {
+        model:   "./assets/3d/box/box.glb",   // 3D model shown on the logo
+        targets: "./targets.mind?v=20260625-ar-logo" // MindAR compiled image target
+      },
+      mindar: {
+        // These map 1:1 onto the MindAR `mindar-image` component schema.
+        // imageTargetSrc: path to the compiled .mind tracker (REQUIRED —
+        //                 without it MindAR has nothing to track).
+        // maxTrack       : number of targets to track simultaneously (1 logo).
+        // filterMinCF/Beta: stabilisation smoothing (Kalman-like).
+        // warmupTolerance: frames required before firing targetFound
+        //                   (higher = more confident first lock).
+        // missTolerance  : frames of loss tolerated before firing targetLost
+        //                   (higher = fewer flickers, slightly slower "lost").
+        // uiLoading/uiScanning: "no" — we render our own overlays.
+        imageTargetSrc:   "./targets.mind?v=20260625-ar-logo",
+        maxTrack:         1,
+        filterMinCF:      0.0001,
+        filterBeta:       0.01,
+        warmupTolerance:  1,
+        missTolerance:    20,
+        uiScanning:       "no",
+        uiLoading:        "no",
+        uiError:          "no"
+      },
+      // Renderer tuned for mobile: capped canvas, color-managed, tone mapped.
+      renderer: {
+        colorManagement:      true,
+        physicallyCorrectLights: true,
+        antialias:            true,
+        toneMapping:          "ACESFilmic",
+        alpha:                true,
+        maxCanvasWidth:       1920,
+        maxCanvasHeight:      1920
+      },
+      // Hard cap on devicePixelRatio — 2 is plenty and saves GPU/RAM on retina.
+      maxPixelRatio: 2,
+      animation: {
+        // Default clip name. "*" = play all clips in the GLB.
+        clip: "*"
+      },
+      model: {
+        // Initial scale — auto-scaled at runtime to match the logo width.
+        scale: 1
+      },
+      // Camera selection. The picker writes the user's choice here; the
+      // getUserMedia shim reads it to override MindAR's hardcoded "environment".
+      camera: {
+        preferRear: true,                 // default facing when no device picked
+        storageKey: "nfc_ar2_camera_id"   // localStorage key for the last pick
+      }
+    };
+
+    /* ----------------------------- Util ------------------------------------ */
+    const Util = {
+      $:  (sel, root = document) => root.querySelector(sel),
+      show: (el) => el && el.classList.add("is-visible"),
+      hide: (el) => el && el.classList.remove("is-visible"),
+      on:  (el, ev, fn, opts) => el && el.addEventListener(ev, fn, opts),
+      // Lerp helper for smooth value transitions.
+      lerp: (a, b, t) => a + (b - a) * t,
+      clamp: (v, lo, hi) => Math.max(lo, Math.min(hi, v))
+    };
+
+    /* ----------------------------- Features --------------------------------
+       Detect browser/camera/WebGL capabilities so we can fail gracefully
+       BEFORE requesting permissions.                                         */
+    const Features = {
+      webgl() {
+        try {
+          const c = document.createElement("canvas");
+          return !!(window.WebGLRenderingContext &&
+                    (c.getContext("webgl") || c.getContext("experimental-webgl")));
+        } catch (e) { return false; }
+      },
+      // A coarse "is this a capable mobile/desktop browser" check.
+      mediaDevices() {
+        return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+      },
+      isUnsupportedBrowser() {
+        const ua = navigator.userAgent || "";
+        // iOS < 11 has no proper WebRTC camera + WebGL combo for AR.
+        const iosMatch = ua.match(/iPhone OS (\d+)_/i);
+        if (iosMatch && parseInt(iosMatch[1], 10) < 11) return true;
+        // Very old Android WebView.
+        if (/Android\s[1-6]\./.test(ua)) return true;
+        return false;
+      }
+    };
+
+    /* ----------------------------- Preloader -------------------------------
+       Preload the model + target file with real byte-progress.
+       This warms the browser cache so the scene later loads instantly, and
+       lets us validate the assets exist (fail fast with a clear message).  */
+    const Preloader = {
+      // GUARANTEED to resolve OR reject within `timeoutMs`.
+      // A bare XHR can hang indefinitely on file:// or on a misconfigured
+      // server (no onerror, no onload) — we wrap it in a hard deadline so the
+      // UI can never freeze waiting on it.
+      fetchWithProgress(url, onProgress, timeoutMs = 15000) {
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          const finish = (fn) => { if (!settled) { settled = true; fn(); } };
+          let xhr = null;
+
+          // Hard deadline — fires even if the XHR silently hangs.
+          const guard = setTimeout(() => {
+            finish(() => {
+              try { xhr && xhr.abort(); } catch (e) {}
+              reject(new Error(`Timeout loading ${url}`));
+            });
+          }, timeoutMs);
+
+          try {
+            xhr = new XMLHttpRequest();
+            xhr.open("GET", url, true);
+            xhr.responseType = "blob"; // any type; we only care it 200s + size
+            xhr.onprogress = (e) => {
+              if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+            };
+            xhr.onload = () => finish(() => {
+              if (xhr.status >= 200 && xhr.status < 300) {
+                clearTimeout(guard);
+                resolve(); // blob discarded — cache is now warm
+              } else {
+                clearTimeout(guard);
+                reject(new Error(`HTTP ${xhr.status} for ${url}`));
+              }
+            });
+            xhr.onerror = () => finish(() => {
+              clearTimeout(guard);
+              reject(new Error(`Network error loading ${url}`));
+            });
+            xhr.ontimeout = () => finish(() => {
+              clearTimeout(guard);
+              reject(new Error(`Timeout loading ${url}`));
+            });
+            xhr.timeout = timeoutMs;
+            xhr.send();
+          } catch (e) {
+            finish(() => { clearTimeout(guard); reject(e); });
+          }
+        });
+      },
+
+      // Best-effort: returns {ok:[], failed:[]} so the caller can decide how
+      // to react. A single missing asset should NOT block the whole journey —
+      // A-Frame's own loader + our model-error path will handle it later.
+      async preload(urls, onOverall) {
+        const per = new Array(urls.length).fill(0);
+        const update = () => {
+          const avg = per.reduce((a, b) => a + b, 0) / per.length;
+          onOverall(Util.clamp(avg, 0, 1));
+        };
+        const results = await Promise.allSettled(
+          urls.map((u, i) =>
+            this.fetchWithProgress(u, (p) => { per[i] = p; update(); }))
+        );
+        const ok = [], failed = [];
+        results.forEach((r, i) => {
+          if (r.status === "fulfilled") ok.push(urls[i]);
+          else failed.push({ url: urls[i], reason: r.reason });
+        });
+        return { ok, failed };
+      }
+    };
+
+    /* ----------------------------- AudioManager ----------------------------
+       AudioContext must be created/resumed inside a user gesture on iOS.
+       We keep a silent buffer ready and expose play() / unlock().           */
+    const AudioManager = {
+      ctx: null,
+      unlocked: false,
+
+      init() {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        if (!this.ctx) this.ctx = new AC();
+      },
+
+      // Call from the Start tap (a user gesture).
+      unlock() {
+        this.init();
+        if (!this.ctx) return;
+        if (this.ctx.state === "suspended") this.ctx.resume();
+        // Play a near-silent blip to fully unlock iOS audio.
+        try {
+          const src = this.ctx.createBufferSource();
+          const buf = this.ctx.createBuffer(1, 1, 22050);
+          src.buffer = buf;
+          src.connect(this.ctx.destination);
+          src.start(0);
+          this.unlocked = true;
+        } catch (e) { /* non-fatal */ }
+      },
+
+      // Optional cue (e.g. on first targetFound). Drops in assets/audio/cue.mp3.
+      play(file = "./assets/audio/cue.mp3") {
+        if (!this.unlocked) return;
+        try {
+          const audio = new Audio(file);
+          audio.volume = 0.6;
+          audio.play().catch(() => {}); // ignore autoplay rejections
+        } catch (e) { /* non-fatal */ }
+      }
+    };
+
+    /* ----------------------------- Effects ---------------------------------
+       Reusable visual effects on the loaded model.                          */
+    const Effects = {
+      // Set opacity across all materials of a THREE.Object3D (the GLB root).
+      setOpacity(object3D, opacity) {
+        if (!object3D) return;
+        object3D.traverse((node) => {
+          const m = node.material;
+          if (!m) return;
+          // A material may be an array; handle both.
+          const mats = Array.isArray(m) ? m : [m];
+          mats.forEach((mat) => {
+            mat.transparent = true;
+            mat.opacity = opacity;
+            // Keep depth-write on while opaque to avoid sorting artifacts.
+            mat.depthWrite = opacity > 0.98;
+            mat.needsUpdate = true;
+          });
+        });
+      },
+
+      // requestAnimationFrame tween with per-frame callback on t (0→1).
+      tween(durationMs, onUpdate) {
+        return new Promise((resolve) => {
+          const start = performance.now();
+          const step = (now) => {
+            const t = Util.clamp((now - start) / durationMs, 0, 1);
+            // easeOutCubic for a snappy, "premium" feel.
+            const eased = 1 - Math.pow(1 - t, 3);
+            onUpdate(eased, t);
+            if (t < 1) requestAnimationFrame(step);
+            else resolve();
+          };
+          requestAnimationFrame(step);
+        });
+      },
+
+      // Entrance: fade in + scale up.
+      async playEntrance(modelEl) {
+        const obj = modelEl.getObject3D("mesh");
+        if (!obj) return;
+        this.setOpacity(obj, 0);
+        modelEl.setAttribute("scale", "0.01 0.01 0.01");
+        modelEl.setAttribute("visible", true);
+        await this.tween(600, (e) => {
+          this.setOpacity(obj, e);
+          const s = Util.lerp(0.01, 1, e);
+          modelEl.setAttribute("scale", `${s} ${s} ${s}`);
+        });
+      },
+
+      // Fade out (keeps object mounted; caller hides it after).
+      async playFadeOut(modelEl) {
+        const obj = modelEl.getObject3D("mesh");
+        if (!obj) return;
+        await this.tween(350, (e) => this.setOpacity(obj, 1 - e));
+      },
+
+      // One-shot expanding particle burst at the target origin.
+      playBurst(targetEntity) {
+        const THREE = window.THREE;
+        if (!THREE || !targetEntity.object3D) return;
+        const COUNT = 60;
+        const positions = new Float32Array(COUNT * 3);
+        const velocities = [];
+        for (let i = 0; i < COUNT; i++) {
+          positions[i * 3] = 0;
+          positions[i * 3 + 1] = 0;
+          positions[i * 3 + 2] = 0;
+          // Random outward direction (hemisphere up-biased).
+          const theta = Math.random() * Math.PI * 2;
+          const phi   = Math.random() * Math.PI * 0.5;
+          const speed = 0.4 + Math.random() * 0.9;
+          velocities.push({
+            x: Math.cos(theta) * Math.sin(phi) * speed,
+            y: Math.cos(phi) * speed + 0.3,
+            z: Math.sin(theta) * Math.sin(phi) * speed
+          });
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        const mat = new THREE.PointsMaterial({
+          color: 0xffffff, size: 0.05, transparent: true, opacity: 1,
+          depthWrite: false, blending: THREE.AdditiveBlending
+        });
+        const points = new THREE.Points(geo, mat);
+        targetEntity.object3D.add(points);
+
+        const start = performance.now();
+        const DURATION = 900;
+        const step = (now) => {
+          const t = Util.clamp((now - start) / DURATION, 0, 1);
+          const arr = geo.attributes.position.array;
+          for (let i = 0; i < COUNT; i++) {
+            const v = velocities[i];
+            const d = t * 1.0;
+            arr[i * 3]     = v.x * d;
+            arr[i * 3 + 1] = v.y * d - 0.6 * d * d; // mild gravity
+            arr[i * 3 + 2] = v.z * d;
+          }
+          geo.attributes.position.needsUpdate = true;
+          mat.opacity = 1 - t;
+          if (t < 1) requestAnimationFrame(step);
+          else {
+            targetEntity.object3D.remove(points);
+            geo.dispose(); mat.dispose();
+          }
+        };
+        requestAnimationFrame(step);
+      }
+    };
+
+    /* ----------------------------- ARScene ---------------------------------
+       Builds the <a-scene> on demand and wires up all AR events.            */
+    const ARScene = {
+      sceneEl: null,
+      targetEl: null,
+      modelEl: null,
+      isTracking: false,
+      hasDetectedOnce: false,
+
+      // Build & inject the scene markup, then let A-Frame initialize it.
+      build(container) {
+        const r = CONFIG.renderer;
+        const rendererAttr = Object.keys(r)
+          .map((k) => `${k}: ${typeof r[k] === "boolean" ? (r[k] ? "true" : "false") : r[k]}`)
+          .join("; ");
+
+        const m = CONFIG.mindar;
+        const mindarAttr = Object.keys(m).map((k) => `${k}: ${m[k]}`).join("; ");
+
+        // NOTE: HTML is authored on one line per element to stay valid when
+        // assigned via innerHTML (A-Frame parses the resulting DOM tree).
+        container.innerHTML = `
+<a-scene
+  mindar-image="${mindarAttr}"
+  renderer="${rendererAttr}"
+  vr-mode-ui="enabled: false"
+  device-orientation-permission-ui="enabled: false"
+  embedded
+  loading-screen="enabled: false"
+  color-management="true">
+
+  <a-assets timeout="60000">
+    <a-asset-item id="model-asset" src="${CONFIG.assets.model}"></a-asset-item>
+  </a-assets>
+
+  <!-- Lighting: physically-correct ambient + key directional. -->
+  <a-light type="ambient" intensity="0.7" color="#ffffff"></a-light>
+  <a-light type="directional" intensity="1.1" position="2 4 3" color="#ffffff"></a-light>
+
+  <a-camera position="0 0 0" look-controls="enabled: false" raycaster="far: 0; objects: none"></a-camera>
+
+  <!-- The image target: everything inside is anchored to the printed logo. -->
+  <a-entity id="target" mindar-image-target="targetIndex: 0">
+    <a-entity id="modelRoot" scale="${CONFIG.model.scale} ${CONFIG.model.scale} ${CONFIG.model.scale}" position="0 0 0" rotation="90 0 0">
+      <a-gltf-model
+        id="shirtAnimation"
+        src="#model-asset"
+        animation-mixer="clip: ${CONFIG.animation.clip}; loop: repeat; timeScale: 1"
+        scale="1 1 1"
+        position="0 0 0"
+        rotation="0 0 0"
+        visible="false">
+      </a-gltf-model>
+    </a-entity>
+  </a-entity>
+</a-scene>`;
+
+        this.sceneEl  = container.querySelector("a-scene");
+        this.targetEl = container.querySelector("#target");
+        this.modelEl  = container.querySelector("#shirtAnimation");
+      },
+
+      // Pin renderer pixel ratio for mobile perf, then start the engine.
+      start() {
+        const scene = this.sceneEl;
+        // Cap DPR once Three renderer exists.
+        const cap = () => {
+          const r = scene.renderer && scene.renderer.xr;
+          const three = scene.renderer;
+          if (three && three.getPixelRatio) {
+            three.setPixelRatio(Math.min(window.devicePixelRatio, CONFIG.maxPixelRatio));
+          }
+        };
+        // Renderer is created during scene init; hook both timings.
+        scene.addEventListener("loaded", cap);
+        cap();
+
+        // Attach all AR lifecycle listeners.
+        scene.addEventListener("arReady",  (e) => App.onARReady(e));
+        scene.addEventListener("arError",  (e) => App.onARError(e));
+
+        this.targetEl.addEventListener("targetFound", (e) => this.onTargetFound(e));
+        this.targetEl.addEventListener("targetLost",  (e) => this.onTargetLost(e));
+
+        // Surface GLB load failures (wrong path / corrupt file / no Draco).
+        this.modelEl.addEventListener("model-error", (e) => {
+          App.fail("model", new Error("Failed to load adamHead.gltf — check the path and referenced texture/bin files."));
+        });
+
+        // Auto-scale: measure the model's own width (including its internal
+        // root-node transform, e.g. the 100x matrix in adamHead.gltf), then
+        // set modelRoot's scale so the final world-space width = 1.0
+        // (i.e. the same width as the MindAR tracked image target).
+        const autoScaleModel = () => {
+          const THREE = window.THREE;
+          if (!THREE) return;
+          const model = this.modelEl.getObject3D("mesh");
+          if (!model) return;
+
+          const modelRoot = this.sceneEl.querySelector("#modelRoot");
+          if (!modelRoot) return;
+
+          // 1) Temporarily set modelRoot scale to 1 so the bounding box
+          //    reflects only the model's own geometry + internal transforms.
+          modelRoot.object3D.scale.set(1, 1, 1);
+          modelRoot.object3D.updateMatrixWorld(true);
+
+          // 2) Temporarily force visibility to true so Box3.setFromObject can measure it.
+          const wasVisible = model.visible;
+          model.visible = true;
+          const invisibleNodes = [];
+          model.traverse((node) => {
+            if (!node.visible) {
+              invisibleNodes.push(node);
+              node.visible = true;
+            }
+          });
+
+          // 3) Temporarily detach from parent to bypass uninitialized parent matrices.
+          const originalParent = model.parent;
+          model.parent = null;
+
+          // 4) Compute the world-space bounding box of the model.
+          model.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(model);
+          const size = new THREE.Vector3();
+          box.getSize(size);
+
+          // Restore parent and visibility.
+          model.parent = originalParent;
+          model.visible = wasVisible;
+          invisibleNodes.forEach((node) => {
+            node.visible = false;
+          });
+
+          // Use the largest horizontal dimension (x or z) as "width".
+          const w = Math.max(size.x, size.z);
+
+          if (w > 0) {
+            // Scale so the model's width = 0.45.
+            const s = 0.45 / w;
+            modelRoot.object3D.scale.set(s, s, s);
+            modelRoot.object3D.updateMatrixWorld(true);
+            console.log(`[ARScene] Auto-scaled model. Measured width=${w.toFixed(4)}, scale=${s.toFixed(6)}`);
+          } else {
+            console.warn(`[ARScene] Auto-scale warning: measured width is non-positive (${w}).`);
+          }
+        };
+
+        // If the model is already loaded (e.g. from cache), scale immediately.
+        if (this.modelEl.getObject3D("mesh")) {
+          autoScaleModel();
+        }
+
+        // Listen for future model-loaded events.
+        this.modelEl.addEventListener("model-loaded", () => autoScaleModel());
+      },
+
+      async onTargetFound() {
+        if (this.isTracking) return;
+        this.isTracking = true;
+        App.onTrackingFound();
+
+        // Make sure clip animations are running.
+        try { this.modelEl.components["animation-mixer"].mixer.timeScale = 1; } catch (e) {}
+
+        // Smooth entrance: fade-in + scale-up (+ burst on first detection).
+        await Effects.playEntrance(this.modelEl);
+        if (!this.hasDetectedOnce) {
+          this.hasDetectedOnce = true;
+          Effects.playBurst(this.targetEl);
+          AudioManager.play();
+        }
+      },
+
+      async onTargetLost() {
+        if (!this.isTracking) return;
+        this.isTracking = false;
+        App.onTrackingLost();
+
+        // Pause clip animations immediately so motion freezes on fade-out.
+        try { this.modelEl.components["animation-mixer"].mixer.timeScale = 0; } catch (e) {}
+
+        await Effects.playFadeOut(this.modelEl);
+        // Only hide if still lost (user may have re-acquired mid-fade).
+        if (!this.isTracking) this.modelEl.setAttribute("visible", false);
+      }
+    };
+
+    /* ----------------------------- CameraManager ---------------------------
+       Lets the user pick which camera/lens to use for AR.
+
+       MindAR's A-Frame bridge hardcodes `facingMode: 'environment'` in its
+       getUserMedia() call and exposes no deviceId option, so we can't tell it
+       which camera to use directly. Instead we install a SCOPED shim on
+       navigator.mediaDevices.getUserMedia that rewrites the video constraints
+       to request our chosen deviceId right before the scene starts, then
+       restore the original afterwards. This requires no edits to MindAR.       */
+    const CameraManager = {
+      selectedDeviceId: null,   // user's choice; the shim reads this
+      _origGetUserMedia: null,  // saved to restore after AR starts
+      _shimInstalled: false,
+
+      // The device the user chose last time (if any). Lets repeat launches
+      // skip the picker. Returns "" if nothing saved.
+      savedDeviceId() {
+        try {
+          return localStorage.getItem(CONFIG.camera.storageKey) || "";
+        } catch (e) { return ""; }
+      },
+      saveDeviceId(id) {
+        try { localStorage.setItem(CONFIG.camera.storageKey, id || ""); } catch (e) {}
+      },
+
+      selectedCameraConstraints() {
+        return {
+          audio: false,
+          video: {
+            deviceId: { exact: this.selectedDeviceId }
+          }
+        };
+      },
+
+      async testSelectedCamera() {
+        if (!this.selectedDeviceId) return { ok: true };
+        try {
+          const probe = await navigator.mediaDevices.getUserMedia(this.selectedCameraConstraints());
+          probe.getTracks().forEach((t) => t.stop());
+          return { ok: true };
+        } catch (error) {
+          return { ok: false, error };
+        }
+      },
+
+      // --- getUserMedia shim ---
+      // Rewrite the video constraints so MindAR opens OUR camera instead of
+      // blindly asking for facingMode: 'environment'.
+      installShim() {
+        if (this._shimInstalled) return;
+        const md = navigator.mediaDevices;
+        if (!md || !md.getUserMedia) return;
+        this._origGetUserMedia = md.getUserMedia.bind(md);
+        const mgr = this;
+        md.getUserMedia = async function (constraints) {
+          if (mgr.selectedDeviceId) {
+            constraints = Object.assign({}, constraints, {
+              video: Object.assign({}, constraints && constraints.video, {
+                deviceId: { exact: mgr.selectedDeviceId },
+                facingMode: undefined   // deviceId takes precedence; avoid conflict
+              })
+            });
+          }
+          try {
+            return await mgr._origGetUserMedia(constraints);
+          } catch (error) {
+            console.warn("[Camera] selected device failed:", error);
+            throw error;
+          }
+        };
+        this._shimInstalled = true;
+      },
+
+      // Restore the native getUserMedia once MindAR has its stream (so the shim
+      // can't interfere with any later unrelated camera use).
+      uninstallShim() {
+        if (!this._shimInstalled || !this._origGetUserMedia) return;
+        navigator.mediaDevices.getUserMedia = this._origGetUserMedia;
+        this._shimInstalled = false;
+      },
+
+      // Label a device as Front/Back with a best-effort guess. Browser labels
+      // are often just "Camera 0" / "Back Camera", so we inspect facing too.
+      describe(device) {
+        const label = (device.label || "Camera").trim();
+        let facing = "";
+        if (device.facingMode != null) {
+          facing = device.facingMode === "user" ? "front" : "back";
+        } else if (/front|user|face/i.test(label)) {
+          facing = "front";
+        } else if (/back|rear|environment|world/i.test(label)) {
+          facing = "back";
+        }
+        return { label, facing };
+      },
+
+      // Enumerate video inputs. Needs a prior camera permission grant (we get
+      // one implicitly from the Start-tap gesture chain) or labels come back
+      // empty. Returns [{deviceId, label, facing}].
+      async listCameras() {
+        const md = navigator.mediaDevices;
+        if (!md || !md.enumerateDevices) return [];
+        let devices = await md.enumerateDevices();
+        let cams = devices.filter((d) => d.kind === "videoinput");
+
+        // Before permission, labels are "" and all cams may share a generic
+        // deviceId. Do a throwaway getUserMedia to unlock labels, then re-list.
+        const needUnlock = cams.length > 0 && cams.every((c) => !c.label);
+        if (needUnlock) {
+          try {
+            const probe = await md.getUserMedia({ video: { facingMode: "environment" } });
+            probe.getTracks().forEach((t) => t.stop());
+          } catch (e) { /* permission denied — fall through with unlabeled list */ }
+          devices = await md.enumerateDevices();
+          cams = devices.filter((d) => d.kind === "videoinput");
+        }
+        return cams.map((d) => Object.assign({ deviceId: d.deviceId }, this.describe(d)));
+      }
+    };
+
+    /* ----------------------------- App -------------------------------------
+       Orchestrates the full journey and centralizes error recovery.         */
+    const App = {
+      els: {},
+      booted: false,
+
+      init() {
+        // Cache DOM nodes.
+        const $ = Util.$;
+        this.els = {
+          loading:    $("#loading-screen"),
+          progressBar:$("#progress-bar"),
+          progressLbl:$("#progress-label"),
+          start:      $("#start-screen"),
+          startBtn:   $("#start-btn"),
+          camera:     $("#camera-screen"),
+          cameraList: $("#camera-list"),
+          camConfirm: $("#cam-confirm"),
+          camBack:    $("#cam-back"),
+          camStatus:  $("#cam-status"),
+          hud:        $("#hud"),
+          hintSearch: $("#hint-search"),
+          hintLost:   $("#hint-lost"),
+          error:      $("#error-screen"),
+          errorTitle: $("#error-title"),
+          errorMsg:   $("#error-message"),
+          retryBtn:   $("#retry-btn"),
+          reloadBtn:  $("#reload-btn"),
+          exitBtn:    $("#exit-btn")
+        };
+
+        // Wire up controls.
+        Util.on(this.els.startBtn, "click", () => this.beginSession());
+        Util.on(this.els.camConfirm, "click", () => this.confirmCamera());
+        Util.on(this.els.camBack,    "click", () => this.backFromCamera());
+        Util.on(this.els.retryBtn, "click", () => location.reload());
+        Util.on(this.els.reloadBtn,"click", () => location.reload());
+        Util.on(this.els.exitBtn,  "click", () => location.reload());
+
+        // 1) Capability gate — fail fast with a friendly message.
+        if (Features.isUnsupportedBrowser()) {
+          return this.fail("unsupported");
+        }
+        if (!Features.webgl()) {
+          return this.fail("webgl");
+        }
+        if (!Features.mediaDevices()) {
+          return this.fail("camera_unavailable");
+        }
+
+        // 2) Kick off preloading; enable Start when done.
+        this.startPreload();
+      },
+
+      async startPreload() {
+        const set = (frac) => {
+          const pct = Math.round(frac * 100);
+          this.els.progressBar.style.width = pct + "%";
+          this.els.progressLbl.textContent = `Loading AR Experience… ${pct}%`;
+        };
+
+        // Watchdog: if we haven't reached the Start screen in 12s, the network
+        // is dead, file:// is silently blocking XHR, or the server isn't
+        // sending Content-Length. Surface a clear message instead of an
+        // eternal 0%. Cancelled once we reach the Start screen.
+        this._watchdog = setTimeout(() => {
+          if (!this._reachedStart) this.fail("assets_stuck");
+        }, 12000);
+
+        const { ok, failed } = await Preloader.preload(
+          [CONFIG.assets.model, CONFIG.assets.targets],
+          set
+        );
+
+        failed.forEach((f) => console.warn("[Preloader] partial:", f.url, f.reason));
+
+        // Both assets are required. If either failed to load, tell the user
+        // exactly which file is missing rather than silently proceeding.
+        if (failed.length > 0) {
+          clearTimeout(this._watchdog);
+          return this.fail("assets", { failed });
+        }
+        set(1);
+        // Tiny beat so the full bar is perceptible before transition.
+        setTimeout(() => this.showStartScreen(), 350);
+      },
+
+      showStartScreen() {
+        this._reachedStart = true;
+        clearTimeout(this._watchdog);
+        Util.hide(this.els.loading);
+        Util.show(this.els.start);
+        this.els.startBtn.disabled = false;
+        this.els.startBtn.textContent = "Start AR Experience";
+      },
+
+      // Called from the Start button (a trusted user gesture). This gesture is
+      // also what lets us enumerate labeled cameras and request permission.
+      async beginSession() {
+        this.els.startBtn.disabled = true;
+        this.els.startBtn.textContent = "Starting…";
+
+        // Unlock audio now — must happen inside this gesture for iOS.
+        AudioManager.unlock();
+
+        // Always show the picker when cameras can be listed. This keeps the
+        // selected lens visible and lets users recover from stale saved IDs.
+        await this.showCameraPicker();
+      },
+
+      // Populate + show the camera picker overlay.
+      async showCameraPicker() {
+        Util.hide(this.els.start);
+        Util.show(this.els.camera);
+        const status = this.els.camStatus;
+        const list = this.els.cameraList;
+        list.innerHTML = "";
+        status.textContent = "Looking for cameras…";
+        this.els.camConfirm.disabled = true;
+
+        let cameras = [];
+        try {
+          cameras = await CameraManager.listCameras();
+        } catch (e) {
+          console.warn("[Camera] enumerate failed:", e);
+        }
+
+        if (!cameras.length) {
+          // No enumerable cameras (older browser / blocked permission). Don't
+          // strand the user — fall through to AR with the default rear camera.
+          status.textContent = "Couldn't list cameras — using the default rear camera.";
+          CameraManager.selectedDeviceId = null;
+          return this.launchAR();
+        }
+
+        status.textContent = cameras.length === 1
+          ? "One camera found."
+          : `Tap a camera to select it (${cameras.length} found).`;
+
+        this._pendingCameras = cameras;
+        const saved = CameraManager.savedDeviceId();
+        let chosenIndex = -1;
+
+        cameras.forEach((cam, i) => {
+          const li = document.createElement("li");
+          li.setAttribute("role", "option");
+          li.dataset.index = String(i);
+          const facingTxt = cam.facing ? cam.facing.charAt(0).toUpperCase() + cam.facing.slice(1) : "";
+          const icon = cam.facing === "front" ? "🤳" : (cam.facing === "back" ? "📷" : "🎥");
+          li.innerHTML =
+            `<span class="cam-icon">${icon}</span>` +
+            `<div class="cam-details" style="flex: 1; min-width: 0; display: flex; flex-direction: column;">` +
+              `<span class="cam-main" style="display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${cam.label || `Camera ${i + 1}`}</span>` +
+              (facingTxt ? `<span class="cam-sub" style="display: block; font-weight: 500; font-size: 12px; color: var(--fg-mute); margin-top: 2px;">${facingTxt} camera</span>` : "") +
+            `</div>`;
+          li.addEventListener("click", () => {
+            list.querySelectorAll(".is-selected").forEach((n) => n.classList.remove("is-selected"));
+            li.classList.add("is-selected");
+            chosenIndex = i;
+            this._chosenCamIndex = i;
+            this.els.camConfirm.disabled = false;
+          });
+          // Pre-select the saved camera, else the best default: first "back" camera, else first.
+          if (chosenIndex === -1 && (cam.deviceId === saved || cam.facing === "back" || i === 0)) {
+            li.classList.add("is-selected");
+            chosenIndex = i;
+            this.els.camConfirm.disabled = false;
+          }
+          list.appendChild(li);
+        });
+
+        this._chosenCamIndex = chosenIndex;
+      },
+
+      // "Start with selected" — record the choice and launch AR.
+      async confirmCamera() {
+        const idx = this._chosenCamIndex;
+        const cam = (this._pendingCameras && this._pendingCameras[idx]) || null;
+        CameraManager.selectedDeviceId = cam ? cam.deviceId : null;
+        console.info("[Camera] selected:", cam ? cam.label : "default");
+        this.els.camConfirm.disabled = true;
+        this.els.camStatus.textContent = "Checking selected camera...";
+
+        const test = await CameraManager.testSelectedCamera();
+        if (!test.ok) {
+          console.warn("[Camera] preflight failed:", test.error);
+          CameraManager.selectedDeviceId = null;
+          CameraManager.saveDeviceId("");
+          this.els.camConfirm.disabled = false;
+          this.els.camStatus.textContent = this.cameraErrorText(test.error);
+          return;
+        }
+
+        CameraManager.saveDeviceId(CameraManager.selectedDeviceId);
+        this.launchAR();
+      },
+
+      cameraErrorText(error) {
+        const name = error && error.name;
+        if (name === "NotReadableError") {
+          return "That webcam is busy in another app. Close Zoom/Teams/Camera, then try again.";
+        }
+        if (name === "NotAllowedError" || name === "SecurityError") {
+          return "Camera permission is blocked. Allow camera access in the browser, then try again.";
+        }
+        if (name === "NotFoundError" || name === "OverconstrainedError") {
+          return "That camera is no longer available. Pick another camera or reconnect it.";
+        }
+        return "That camera could not start. Pick another camera or reconnect it.";
+      },
+
+      // "Back" — return to the start screen without launching.
+      backFromCamera() {
+        Util.hide(this.els.camera);
+        Util.show(this.els.start);
+        this.els.startBtn.disabled = false;
+        this.els.startBtn.textContent = "Start AR Experience";
+      },
+
+      // Actually build + start the scene (with the chosen camera wired in).
+      launchAR() {
+        Util.hide(this.els.camera);
+        Util.hide(this.els.start);
+        Util.show(this.els.loading);
+        this.els.progressBar.style.width = "100%";
+        this.els.progressLbl.textContent = "Starting camera…";
+
+        // Install the shim BEFORE MindAR requests the camera, and remove it
+        // once AR is ready (or errored) so it can't leak.
+        CameraManager.installShim();
+
+        try {
+          ARScene.build(document.getElementById("ar-container"));
+          ARScene.start();
+          // arReady / arError handlers below uninstall the shim.
+        } catch (err) {
+          CameraManager.uninstallShim();
+          this.fail("unknown", err);
+        }
+      },
+
+      /* ----- AR lifecycle handlers ----- */
+
+      onARReady() {
+        console.info("[AR] MindAR initialized successfully.");
+        CameraManager.uninstallShim();   // MindAR has its stream — stop overriding.
+        Util.hide(this.els.loading);
+        Util.hide(this.els.start);
+        this.els.hud.classList.remove("hidden");
+        // Show the "point at logo" hint until first detection.
+        Util.show(this.els.hintSearch);
+        Util.hide(this.els.hintLost);
+      },
+
+      onARError(e) {
+        console.error("[AR] arError", e.detail || e);
+        CameraManager.uninstallShim();
+        // The most common cause here is a denied/failed camera permission.
+        // If the user picked a specific camera that can't open, give them a
+        // way to retry with the picker by clearing the saved choice.
+        if (CameraManager.selectedDeviceId) {
+          CameraManager.saveDeviceId("");
+          CameraManager.selectedDeviceId = null;
+        }
+        this.fail("camera_permission", e.detail || e);
+      },
+
+      onTrackingFound() {
+        console.info("[AR] targetFound — animation active.");
+        Util.hide(this.els.hintSearch);
+        Util.hide(this.els.hintLost);
+      },
+
+      onTrackingLost() {
+        console.info("[AR] targetLost — animation paused.");
+        // Only show the "lost" card after the user has seen a detection once;
+        // before that, the friendlier "search" hint stays up.
+        if (ARScene.hasDetectedOnce) {
+          Util.hide(this.els.hintSearch);
+          Util.show(this.els.hintLost);
+        } else {
+          Util.show(this.els.hintSearch);
+        }
+      },
+
+      /* ----- Centralized error recovery -----
+         Defensive: resolves every DOM node it needs by id at call time, so this
+         works even if a failure happens BEFORE App.init() cached this.els.   */
+      fail(type, err) {
+        if (err) console.error("[App] failure:", type, err);
+
+        // Always resolve fresh — fail() may run before init() populates this.els.
+        const get = (id) => document.getElementById(id);
+        const setTxt = (id, txt) => { const el = get(id); if (el) el.textContent = txt; };
+
+        // If we still have a watchdog timer running, clear it.
+        clearTimeout(this._watchdog);
+
+        const messages = {
+          unsupported: {
+            title: "Browser not supported",
+            msg:   "Please open this link in Safari (iOS) or Chrome (Android), version 11 or newer."
+          },
+          library: {
+            title: "Couldn't load AR libraries",
+            msg:   "A required script failed to download. Check your internet connection and reload."
+          },
+          webgl: {
+            title: "WebGL not available",
+            msg:   "Your device doesn't support WebGL, which is required for AR. Try another browser or device."
+          },
+          camera_unavailable: {
+            title: "Camera unavailable",
+            msg:   "We couldn't access a camera on this device. AR needs a rear camera to work."
+          },
+          camera_permission: {
+            title: "Camera access denied",
+            msg:   "Please allow camera access in your browser settings, then tap Try again. If you selected an external webcam, close any other app using it first."
+          },
+          model: {
+            title: "Couldn't load the 3D model",
+            msg:   "The 3D model failed to load. Check that adamHead.gltf and its referenced texture/bin files are present and valid."
+          },
+          assets: (() => {
+            // Be specific about WHICH files are missing.
+            const failedFiles = err && err.failed
+              ? err.failed.map((f) => f.url.replace("./", ""))
+              : [CONFIG.assets.model.replace("./", ""), "targets.mind"];
+            return {
+              title: "Required files are missing",
+              msg:   `Upload these files next to index.html: ${failedFiles.join(", ")}. They don't exist (yet) at that location.`
+            };
+          })(),
+          assets_stuck: {
+            title: "Loading is taking too long",
+            msg:   "You're opening this from a file (file://), which browsers block for security. Instead: double-click start.bat (in the project folder) — it launches a local server and opens the page for you. For the real camera on a phone, deploy to Netlify (app.netlify.com/drop) to get a free https:// URL."
+          },
+          unknown: {
+            title: "Something went wrong",
+            msg:   "An unexpected error occurred. Please reload to try again."
+          }
+        };
+
+        const info = messages[type] || messages.unknown;
+        setTxt("error-title", info.title);
+        setTxt("error-message", info.msg);
+
+        // Hide every other layer, show the error screen.
+        ["loading-screen", "start-screen", "camera-screen"].forEach((id) => {
+          const el = get(id); if (el) el.classList.remove("is-visible");
+        });
+        const hud = get("hud"); if (hud) hud.classList.add("hidden");
+        const errorEl = get("error-screen"); if (errorEl) errorEl.classList.add("is-visible");
+      }
+    };
+
+    /* ----------------------------- Boot ------------------------------------ */
+    // Wait for DOM, then go. Wrapped so partial library failures still show
+    // a friendly error instead of a silent black screen.
+    function boot() {
+      try {
+        // file:// blocks XHR + camera APIs → can never reach Start. Catch it
+        // up front with an actionable message instead of stranding at 0%.
+        if (location.protocol === "file:") {
+          return App.fail("assets_stuck");
+        }
+
+        // Libraries loaded? A-Frame is the anchor of the whole experience.
+        // Retry briefly for slow networks, but BOUNDED — if the CDN is down
+        // we surface a clear error instead of looping forever at 0%.
+        if (!window.AFRAME) {
+          boot._tries = (boot._tries || 0) + 1;
+          if (boot._tries >= 20) {            // ~6s of retrying
+            return App.fail("library", new Error("A-Frame failed to load from CDN."));
+          }
+          setTimeout(boot, 300);
+          return;
+        }
+
+        App.booted = true;
+        App.init();
+      } catch (e) {
+        App.fail("unknown", e);
+      }
+    }
+
+    // Catch-all for uncaught errors and failed script loads (e.g. a blocked
+    // CDN). Without this, a missing <script src> leaves the page on the
+    // default loading screen forever.
+    function emergencyFail(message) {
+      try {
+        console.error("[App] emergency fail:", message);
+        App.fail("unknown", new Error(message));
+      } catch (e) {
+        // Absolute last resort: at least make the screen show *something*.
+        document.body.insertAdjacentHTML("beforeend",
+          '<div style="position:fixed;inset:0;z-index:9999;display:flex;' +
+          'align-items:center;justify-content:center;text-align:center;' +
+          'padding:24px;font-family:sans-serif;color:#fff;background:#0a0a0a;">' +
+          'The experience failed to load. Please reload the page.</div>');
+      }
+    }
+    window.addEventListener("error", (e) => {
+      // Ignore cross-origin script noise that we can't act on.
+      if (e && e.error) emergencyFail(e.error.message || "Uncaught error");
+    });
+    window.addEventListener("unhandledrejection", (e) => {
+      emergencyFail((e && e.reason && e.reason.message) || "Unhandled promise rejection");
+    });
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", boot);
+    } else {
+      boot();
+    }
+  })();
+  </script>
+</body>
+</html>
