@@ -1,8 +1,8 @@
 {
   "cleanUrls": true,
-  "installCommand": "echo 'Skipping npm install for static site'",
-  "buildCommand": "echo 'Deploying static files'",
-  "outputDirectory": ".",
+  "installCommand": null,
+  "buildCommand": null,
+  "outputDirectory": "./",
   "headers": [
     {
       "source": "/(.*)\\.(mind|glb|gltf|bin|mp3)",
